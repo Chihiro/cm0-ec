@@ -132,35 +132,25 @@ target_link_options(${PROJECT_NAME} PUBLIC
     ${CC_SECURE}
 
     # Linker flags specific to Debug build type
-    $<$<CONFIG:Debug>: 
+    $<$<CONFIG:Debug>:
         -T${CMAKE_CURRENT_BINARY_DIR}/stm32l051x8_flash.ld
         -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/ec.map
-        -u
-        _printf_float
+        --specs=nano.specs
         --specs=nosys.specs
-        -Wl,--start-group
         -lc
         -lm
-        -lstdc++
-        -lsupc++
-        -Wl,--end-group
         -Wl,-z,max-page-size=8
         -Wl,--print-memory-usage
     >
 
     # Linker flags specific to Release build type
-    $<$<CONFIG:Release>: 
+    $<$<CONFIG:Release>:
         -T${CMAKE_CURRENT_BINARY_DIR}/stm32l051x8_flash.ld
         -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/ec.map
-        -u
-        _printf_float
+        --specs=nano.specs
         --specs=nosys.specs
-        -Wl,--start-group
         -lc
         -lm
-        -lstdc++
-        -lsupc++
-        -Wl,--end-group
         -Wl,-z,max-page-size=8
         -Wl,--print-memory-usage
     >

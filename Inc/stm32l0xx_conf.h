@@ -23,6 +23,7 @@ extern "C" {
 #include "stm32l0xx_ll_cortex.h"
 #include "stm32l0xx_ll_utils.h"
 #include "stm32l0xx_ll_pwr.h"
+#include "stm32l0xx_ll_usart.h"
 
 /* Exported types ------------------------------------------------------------*/
 /* Exported constants --------------------------------------------------------*/
