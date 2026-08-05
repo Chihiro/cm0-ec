@@ -1,0 +1,20 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "STM32: 仅烧录",
+      "type": "shell",
+      "command": "chcp 437 > nul && \"C:\\Users\\xiaol\\AppData\\Local\\stm32cube\\bundles\\programmer\\2.23.0\\bin\\STM32_Programmer_CLI.exe\" -c port=SWD -d \"${workspaceFolder}\\build\\Debug\\ec.elf\" -v -g",
+      "options": {
+        "shell": {
+          "executable": "C:\\Windows\\System32\\cmd.exe",
+          "args": [
+            "/d",
+            "/c"
+          ]
+        }
+      },
+      "problemMatcher": []
+    }
+  ]
+}
