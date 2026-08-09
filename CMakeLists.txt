@@ -32,6 +32,12 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/files.cmake)
 target_sources(${PROJECT_NAME} PRIVATE
   # System initialization
   "${CMAKE_CURRENT_SOURCE_DIR}/Src/system_stm32l0xx.c"
+  # BQ27220 fuel gauge driver
+  "${CMAKE_CURRENT_SOURCE_DIR}/Src/bq27220.c"
+  # EC platform abstraction (STM32L051 LL implementation)
+  "${CMAKE_CURRENT_SOURCE_DIR}/Src/ec_platform_stm32l051.c"
+  # EC state machine (business logic)
+  "${CMAKE_CURRENT_SOURCE_DIR}/Src/ec_state_machine.c"
   # LL Utils (SysTick delay functions)
   "${CMAKE_CURRENT_SOURCE_DIR}/../STM32CubeL0/Drivers/STM32L0xx_HAL_Driver/Src/stm32l0xx_ll_utils.c"
 )

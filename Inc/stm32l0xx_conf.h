@@ -24,6 +24,8 @@ extern "C" {
 #include "stm32l0xx_ll_utils.h"
 #include "stm32l0xx_ll_pwr.h"
 #include "stm32l0xx_ll_usart.h"
+#include "stm32l0xx_ll_i2c.h"
+#include "stm32l0xx_ll_exti.h"
 
 /* Exported types ------------------------------------------------------------*/
 /* Exported constants --------------------------------------------------------*/
