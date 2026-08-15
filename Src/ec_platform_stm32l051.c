@@ -56,6 +56,11 @@
 #define USART2_TX_PIN       LL_GPIO_PIN_2
 #define USART2_TX_AF        LL_GPIO_AF_4
 
+/* I2C2 pins (PB13=SCL, PB14=SDA) — reserved for Linux host, kept analog for now */
+#define I2C2_SCL_PIN        LL_GPIO_PIN_13
+#define I2C2_SDA_PIN        LL_GPIO_PIN_14
+#define I2C2_PINS           (LL_GPIO_PIN_13 | LL_GPIO_PIN_14)
+
 /*============================================================================
  * Static State
  *============================================================================*/
@@ -157,6 +162,10 @@ static bool gpio_init(void)
     /* ---- PC13: PG input with pull-up (active LOW) ---- */
     LL_GPIO_SetPinMode(PG_GPIO_PORT, PG_PIN, LL_GPIO_MODE_INPUT);
     LL_GPIO_SetPinPull(PG_GPIO_PORT, PG_PIN, LL_GPIO_PULL_UP);
+
+    /* ---- PB13/PB14: I2C2 pins, analog high-Z (reserved for Linux host) ---- */
+    LL_GPIO_SetPinMode(GPIOB, I2C2_PINS, LL_GPIO_MODE_ANALOG);
+    LL_GPIO_SetPinPull(GPIOB, I2C2_PINS, LL_GPIO_PULL_NO);
 
     return true;
 }
