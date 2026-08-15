@@ -7,7 +7,7 @@
  *     - Key debounce (30 ms press/release, 3 s long press)
  *     - PG debounce (200 ms)
  *     - LED patterns (2 s period, SOC colors with hysteresis, blue pulse)
- *     - SOC polling (≤1 Hz, 500 ms command guard)
+ *     - Per-cycle status print (voltage, current, SOC, PG) at ≤1 Hz
  *     - STOP with strict KEY/PG wakeup evidence rules
  *     - 10 s idle timer for STOP entry
  *
@@ -16,7 +16,8 @@
  *     - Main loop runs continuously — EC_Task() returns after each iteration
  *     - STOP is a synchronous operation that blocks within EC_Task()
  *     - BQ25601 is NOT accessed via I2C — only PG GPIO
- *     - Only RelativeStateOfCharge() is read during runtime (NORMAL mode)
+ *     - Voltage, Current, and RelativeStateOfCharge() read each cycle (NORMAL mode)
+ *     - Voltage and current also read each polling cycle for status print
  ******************************************************************************
  */
 
@@ -79,6 +80,12 @@ typedef struct {
     bool          full;          /* Latest valid SOC was 100 */
     uint32_t      last_attempt_ms; /* When last SOC transaction began */
     bool          in_progress;   /* SOC read transaction in flight */
+
+    /* Voltage & Current (read alongside SOC, printed every polling cycle) */
+    uint16_t      voltage_mv;    /* Battery voltage in mV */
+    bool          voltage_valid;
+    int16_t       current_ma;    /* Instantaneous current in mA (+charge, -discharge) */
+    bool          current_valid;
 } ec_soc_t;
 
 typedef struct {
@@ -375,9 +382,10 @@ static void display_clear(void)
  * Rules:
  *   - Maximum once per second
  *   - Minimum 500 ms between standard commands (shared BOOT + runtime)
- *   - Only RelativeStateOfCharge() is read during runtime
+ *   - Voltage, Current, and RelativeStateOfCharge() are read each cycle
  *   - On success & SOC≤100: update valid, color, full flag
  *   - On failure or SOC>100: clear valid, clear full, R/G off
+ *   - Status printed every cycle: V, I, SOC%, PG state, load state
  *   - Display request cleared on ANY SOC result (success or failure)
  *============================================================================*/
 
@@ -402,12 +410,30 @@ static void soc_schedule(uint32_t now)
         return;
     }
 
-    /* Mark attempt start BEFORE the transaction */
+    /* Mark attempt start BEFORE the transactions */
     g_ec.soc.last_attempt_ms = now;
     g_ec.soc.in_progress = true;
     g_ec.last_command_ms = now;
 
-    /* Execute read */
+    /* ---- Read Voltage ---- */
+    uint16_t voltage_raw;
+    if (BQ27220_ReadVoltage(&voltage_raw)) {
+        g_ec.soc.voltage_mv = voltage_raw;
+        g_ec.soc.voltage_valid = true;
+    } else {
+        g_ec.soc.voltage_valid = false;
+    }
+
+    /* ---- Read Current ---- */
+    int16_t current_raw;
+    if (BQ27220_ReadCurrent(&current_raw)) {
+        g_ec.soc.current_ma = current_raw;
+        g_ec.soc.current_valid = true;
+    } else {
+        g_ec.soc.current_valid = false;
+    }
+
+    /* ---- Read SOC ---- */
     uint16_t soc_raw;
     if (BQ27220_ReadSOC(&soc_raw)) {
         if (soc_raw <= 100U) {
@@ -416,25 +442,36 @@ static void soc_schedule(uint32_t now)
             g_ec.soc.value = soc_raw;
             g_ec.soc.full = (soc_raw == 100U);
             g_ec.soc.color = soc_to_color(soc_raw, g_ec.soc.color);
-            LOG("[SOC] Read OK: %u%%  color=%s  full=%s",
-                soc_raw,
-                g_ec.soc.color == EC_COLOR_GREEN ? "GREEN" :
-                g_ec.soc.color == EC_COLOR_YELLOW ? "YELLOW" :
-                g_ec.soc.color == EC_COLOR_RED ? "RED" : "OFF",
-                g_ec.soc.full ? "YES" : "no");
         } else {
             /* SOC > 100: invalid */
             g_ec.soc.valid = false;
             g_ec.soc.full = false;
             g_ec.soc.color = EC_COLOR_OFF;
-            LOG("[SOC] Read value=%u (>100) — marked invalid", soc_raw);
         }
     } else {
         /* I2C read failed */
         g_ec.soc.valid = false;
         g_ec.soc.full = false;
         g_ec.soc.color = EC_COLOR_OFF;
-        LOG("[SOC] Read FAILED — marked invalid (NORMAL kept)");
+    }
+
+    /* ---- Print comprehensive status every polling cycle ---- */
+    {
+        bool pg = pg_is_stable_active();
+        const char *color_str =
+            g_ec.soc.color == EC_COLOR_GREEN  ? "GREEN" :
+            g_ec.soc.color == EC_COLOR_YELLOW ? "YELLOW" :
+            g_ec.soc.color == EC_COLOR_RED    ? "RED" : "OFF";
+        const char *state_str =
+            g_ec.state == EC_STATE_LOAD_RUNNING ? "RUN" : "IDLE";
+
+        LOG("[STATUS] V=%u mV  I=%d mA  SOC=%u%%  PG=%s  %s  %s",
+            g_ec.soc.voltage_valid ? g_ec.soc.voltage_mv : 0U,
+            g_ec.soc.current_valid ? (int)g_ec.soc.current_ma : 0,
+            g_ec.soc.valid ? g_ec.soc.value : 0U,
+            pg ? "VBUS" : "BAT",
+            state_str,
+            color_str);
     }
 
     g_ec.soc.in_progress = false;
@@ -714,6 +751,10 @@ void EC_Init(void)
     g_ec.soc.full = false;
     g_ec.soc.last_attempt_ms = 0U;
     g_ec.soc.in_progress = false;
+    g_ec.soc.voltage_mv = 0U;
+    g_ec.soc.voltage_valid = false;
+    g_ec.soc.current_ma = 0;
+    g_ec.soc.current_valid = false;
     g_ec.display.display_requested = false;
     g_ec.display.display_start_ms = 0U;
     g_ec.last_command_ms = 0U;
