@@ -20,6 +20,10 @@ enable_language(C ASM)
 
 set(PROJECT_NAME ec)
 
+# Disable with: cmake --preset Release -DEC_ENABLE_OLED=OFF
+# Existing build caches keep their value; changing the default does not override it.
+option(EC_ENABLE_OLED "Enable the SSD1306 OLED display and u8g2" OFF)
+
 # Create an executable object type
 add_executable(${PROJECT_NAME})
 
@@ -34,13 +38,46 @@ target_sources(${PROJECT_NAME} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/Src/system_stm32l0xx.c"
   # BQ27220 fuel gauge driver
   "${CMAKE_CURRENT_SOURCE_DIR}/Src/bq27220.c"
-  # EC platform abstraction (STM32L051 LL implementation)
+  # EC platform and state machine
   "${CMAKE_CURRENT_SOURCE_DIR}/Src/ec_platform_stm32l051.c"
-  # EC state machine (business logic)
   "${CMAKE_CURRENT_SOURCE_DIR}/Src/ec_state_machine.c"
   # LL Utils (SysTick delay functions)
   "${CMAKE_CURRENT_SOURCE_DIR}/../STM32CubeL0/Drivers/STM32L0xx_HAL_Driver/Src/stm32l0xx_ll_utils.c"
 )
+
+if(EC_ENABLE_OLED)
+target_sources(${PROJECT_NAME} PRIVATE
+  # 0.91" OLED 128x32 (SSD1306) driver — shared I2C1 bus
+  "${CMAKE_CURRENT_SOURCE_DIR}/Src/oled_ssd1306.c"
+  # OLED page controller (dashboard + electrical details)
+  "${CMAKE_CURRENT_SOURCE_DIR}/Src/oled_display.c"
+  # Minimal u8g2 2.36.19 subset: full-buffer drawing + SSD1306 128x32
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_bitmap.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_box.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_buffer.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_circle.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_font.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_font_ec_ui_12.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_font_ec_values_9x15.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_fonts_selected.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_hvline.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_intersection.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_kerning.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_line.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_ll_hvline.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8g2_setup.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8x8_8x8.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8x8_byte.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8x8_cad.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8x8_d_ssd1306_128x32.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8x8_display.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8x8_gpio.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc/u8x8_setup.c"
+)
+target_include_directories(${PROJECT_NAME} PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/u8g2/csrc"
+)
+endif()
 
 # Add include directories
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -63,6 +100,7 @@ target_compile_options(${PROJECT_NAME} PRIVATE
 target_compile_definitions(${PROJECT_NAME} PRIVATE
   # Target device: STM32L051C8T6
   STM32L051xx
+  EC_ENABLE_OLED=$<BOOL:${EC_ENABLE_OLED}>
 )
 
 # Linker options

@@ -24,6 +24,7 @@
 #include "ec_state_machine.h"
 #include "ec_platform.h"
 #include "bq27220.h"
+#include "oled_display.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -40,7 +41,7 @@
 #define SOC_INTERVAL_MS         1000U
 #define CMD_GUARD_MS            500U
 #define IDLE_TIMEOUT_MS         10000U
-#define DISPLAY_REQUEST_MS      2000U
+#define DISPLAY_REFRESH_MS      1000U
 
 /*============================================================================
  * SOC Color Hysteresis Thresholds
@@ -62,6 +63,7 @@ typedef struct {
     bool     raw;                /* Current GPIO reading (true = pressed) */
     bool     stable;             /* Debounced state (30 ms) */
     bool     long_event;         /* Latched one-shot long-press event */
+    bool     short_event;        /* Latched one-shot short-press event */
     bool     timing;             /* Currently timing a potential long press */
     uint32_t changed_at_ms;      /* When raw last changed */
     uint32_t pressed_start_ms;   /* When stable press began */
@@ -89,8 +91,7 @@ typedef struct {
 } ec_soc_t;
 
 typedef struct {
-    bool     display_requested;  /* Short-press display request active */
-    uint32_t display_start_ms;   /* When display request started */
+    uint32_t last_refresh_ms;    /* When OLED page was last redrawn */
 } ec_display_t;
 
 typedef struct {
@@ -160,10 +161,15 @@ static void key_update(uint32_t now)
                 g_ec.key.pressed_start_ms = now;
             }
         } else if (prev_stable && !g_ec.key.stable) {
-            /* Release detected */
+            /* Release detected. If we were still timing a long press,
+             * it was a short press (released before 3 s). */
+            bool was_short = g_ec.key.timing;
             g_ec.key.armed = true;
             g_ec.key.timing = false;
             g_ec.key.long_event = false;
+            if (was_short) {
+                g_ec.key.short_event = true;
+            }
         }
     }
 
@@ -181,6 +187,13 @@ static bool key_take_long_event(void)
 {
     bool event = g_ec.key.long_event;
     g_ec.key.long_event = false;
+    return event;
+}
+
+static bool key_take_short_event(void)
+{
+    bool event = g_ec.key.short_event;
+    g_ec.key.short_event = false;
     return event;
 }
 
@@ -357,23 +370,26 @@ static void led_apply(uint32_t now)
 }
 
 /*============================================================================
- * Display Request Handling
+ * OLED Display Handling
  *
- * Short press (or STOP wakeup short-click) requests a 2-second battery
- * display. If SOC is valid, display immediately. If SOC is invalid,
- * wait for next SOC result — which clears the request regardless of
- * success or failure.
+ * Short press (or STOP wakeup short-click) advances to the next page.
+ * A 1 s timer redraws the current page so values track SOC/current/load.
  *============================================================================*/
 
-static void display_request(uint32_t now)
+static void display_next_page(uint32_t now)
 {
-    g_ec.display.display_requested = true;
-    g_ec.display.display_start_ms = now;
+    ec_status_t st;
+    EC_GetStatus(&st);
+    OLED_Display_NextPage(&st);
+    g_ec.display.last_refresh_ms = now;
 }
 
-static void display_clear(void)
+static void display_refresh(uint32_t now)
 {
-    g_ec.display.display_requested = false;
+    ec_status_t st;
+    EC_GetStatus(&st);
+    OLED_Display_Refresh(&st);
+    g_ec.display.last_refresh_ms = now;
 }
 
 /*============================================================================
@@ -386,7 +402,6 @@ static void display_clear(void)
  *   - On success & SOC≤100: update valid, color, full flag
  *   - On failure or SOC>100: clear valid, clear full, R/G off
  *   - Status printed every cycle: V, I, SOC%, PG state, load state
- *   - Display request cleared on ANY SOC result (success or failure)
  *============================================================================*/
 
 static void soc_schedule(uint32_t now)
@@ -475,9 +490,6 @@ static void soc_schedule(uint32_t now)
     }
 
     g_ec.soc.in_progress = false;
-
-    /* Clear display request on ANY SOC result */
-    display_clear();
 }
 
 /*============================================================================
@@ -602,6 +614,7 @@ static void stop_execute(uint32_t now)
     EC_Platform_SetLedRed(false);
     EC_Platform_SetLedGreen(false);
     EC_Platform_SetLedBlue(false);
+    OLED_Display_Sleep();   /* panel + charge pump off for lowest power */
     EC_Platform_EnterStop();
     LOG("[STOP] Woke from STOP");
 
@@ -640,6 +653,9 @@ static void stop_execute(uint32_t now)
     /* Re-read millis after STOP (SysTick was re-initialized) */
     now = EC_Platform_Millis();
 
+    /* Wake the OLED now that I2C1 has been re-initialized by RestoreAfterStop */
+    OLED_Display_Wake();
+
     /*
      * 8. Build wake evidence.
      *
@@ -669,7 +685,7 @@ static void stop_execute(uint32_t now)
         refresh_activity(now);
         if (!key_cutoff_low) {
             /* Key already released → wakeup short-click */
-            display_request(now);
+            display_next_page(now);
         }
         return;
     }
@@ -709,7 +725,7 @@ static void handle_active_idle(uint32_t now)
         EC_Platform_SetLoadEnabled(true);
         g_ec.state = EC_STATE_LOAD_RUNNING;
         refresh_activity(now);
-        display_clear();
+        display_refresh(now);
     }
 }
 
@@ -721,7 +737,7 @@ static void handle_load_running(uint32_t now)
         EC_Platform_SetLoadEnabled(false);
         g_ec.state = EC_STATE_ACTIVE_IDLE;
         refresh_activity(now);
-        display_clear();
+        display_refresh(now);
     }
 }
 
@@ -755,13 +771,11 @@ void EC_Init(void)
     g_ec.soc.voltage_valid = false;
     g_ec.soc.current_ma = 0;
     g_ec.soc.current_valid = false;
-    g_ec.display.display_requested = false;
-    g_ec.display.display_start_ms = 0U;
+    g_ec.display.last_refresh_ms = 0U;
     g_ec.last_command_ms = 0U;
     g_ec.anomaly_count = 0U;
 
     /* 1. Platform init: clock, GPIO (PA1 LOW, LEDs OFF), SysTick, I2C1 */
-    LOG("[INIT] Platform init start...");
     if (!EC_Platform_Init()) {
         /* Critical failure — cannot establish safe outputs.
          * Platform init already set PA1 LOW and LEDs OFF.
@@ -805,6 +819,7 @@ void EC_Init(void)
     }
     g_ec.key.timing = false;
     g_ec.key.long_event = false;
+    g_ec.key.short_event = false;
 
     pg_force(EC_Platform_IsPgActive(), now);
     LOG("[INIT] PG initial state: %s", g_ec.pg.stable ? "ACTIVE (VBUS present)" : "INACTIVE (no VBUS)");
@@ -866,6 +881,14 @@ void EC_Task(void)
     default:
         break;
     }
+
+    /* 6. OLED: short press advances page; 1 s timer redraws current page */
+    if (key_take_short_event()) {
+        display_next_page(now);
+    }
+    if (time_elapsed(now, g_ec.display.last_refresh_ms, DISPLAY_REFRESH_MS)) {
+        display_refresh(now);
+    }
 }
 
 /*============================================================================
@@ -880,4 +903,21 @@ ec_state_t EC_GetState(void)
 ec_gauge_mode_t EC_GetGaugeMode(void)
 {
     return g_ec.gauge_mode;
+}
+
+void EC_GetStatus(ec_status_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    out->state         = g_ec.state;
+    out->gauge_mode    = g_ec.gauge_mode;
+    out->soc_valid     = (g_ec.gauge_mode == EC_GAUGE_NORMAL) && g_ec.soc.valid;
+    out->soc_percent   = g_ec.soc.value;
+    out->voltage_valid = g_ec.soc.voltage_valid;
+    out->voltage_mv    = g_ec.soc.voltage_mv;
+    out->current_valid = g_ec.soc.current_valid;
+    out->current_ma    = g_ec.soc.current_ma;
+    out->pg_active     = pg_is_stable_active();
 }

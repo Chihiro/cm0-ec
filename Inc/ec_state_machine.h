@@ -51,8 +51,30 @@ typedef enum {
 } ec_soc_color_t;
 
 /*============================================================================
+ * Status Snapshot (read-only view for display / inspection)
+ *============================================================================*/
+
+typedef struct {
+    ec_state_t       state;        /* Load switch: LOAD_RUNNING = ON */
+    ec_gauge_mode_t  gauge_mode;   /* NORMAL / NO_GAUGE */
+    bool             soc_valid;
+    uint16_t         soc_percent;  /* 0–100 % */
+    bool             voltage_valid;
+    uint16_t         voltage_mv;   /* mV */
+    bool             current_valid;
+    int16_t          current_ma;   /* + charge, - discharge */
+    bool             pg_active;    /* VBUS present (BQ25601 PG) */
+} ec_status_t;
+
+/*============================================================================
  * Public API
  *============================================================================*/
+
+/**
+ * @brief  Fill a snapshot of current business/gauge status.
+ *         Safe to call from display code each refresh cycle.
+ */
+void EC_GetStatus(ec_status_t *out);
 
 /**
  * @brief  One-time initialization: platform init, gauge BOOT, enter ACTIVE_IDLE.

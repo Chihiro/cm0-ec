@@ -67,6 +67,9 @@
 
 static volatile uint32_t s_millis;
 static volatile bool     s_services_suspended;
+static bool              s_usart2_ready;
+
+#define USART2_TIMEOUT_LOOPS 50000U
 
 /* STOP wake flags — set from EXTI ISRs */
 static volatile uint32_t s_stop_wake_flags;
@@ -232,6 +235,9 @@ void EC_Platform_SetLedBlue(bool on)
 
 void EC_Platform_Usart2Init(void)
 {
+    uint32_t timeout = USART2_TIMEOUT_LOOPS;
+    s_usart2_ready = false;
+
     /* Enable USART2 + GPIOA clocks */
     LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART2);
     LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
@@ -263,13 +269,29 @@ void EC_Platform_Usart2Init(void)
 
     /* Wait for USART ready */
     while (LL_USART_IsActiveFlag_TEACK(USART2) == 0U) {
+        if (timeout-- == 0U) {
+            LL_USART_Disable(USART2);
+            return;
+        }
     }
+    s_usart2_ready = true;
 }
 
 int EC_Platform_Putchar(int ch)
 {
-    /* Block until TX data register empty */
+    uint32_t timeout = USART2_TIMEOUT_LOOPS;
+
+    /* Early logs or a failed USART must never block power management. */
+    if (!s_usart2_ready) {
+        return EOF;
+    }
+
+    /* Wait for TX with a bounded timeout. */
     while (LL_USART_IsActiveFlag_TXE(USART2) == 0U) {
+        if (timeout-- == 0U) {
+            s_usart2_ready = false;
+            return EOF;
+        }
     }
     LL_USART_TransmitData8(USART2, (uint8_t)(ch & 0xFFU));
     return ch;
