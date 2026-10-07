@@ -63,7 +63,21 @@ typedef struct {
     uint16_t         voltage_mv;   /* mV */
     bool             current_valid;
     int16_t          current_ma;   /* + charge, - discharge */
+    bool             average_current_valid;
+    int16_t          average_current_ma;
+    bool             remaining_capacity_valid;
+    uint16_t         remaining_capacity_mah;
+    bool             full_charge_capacity_valid;
+    uint16_t         full_charge_capacity_mah;
+    bool             battery_status_valid;
+    uint16_t         battery_status; /* Raw BQ27220 BatteryStatus() */
+    bool             time_to_empty_valid;
+    uint16_t         time_to_empty_min; /* 0xFFFF = unavailable */
+    bool             time_to_full_valid;
+    uint16_t         time_to_full_min;  /* 0xFFFF = unavailable */
+    uint32_t         sample_sequence;   /* Increments after each gauge poll */
     bool             pg_active;    /* VBUS present (BQ25601 PG) */
+    bool             power_off_pending; /* Host-requested load-off countdown */
 } ec_status_t;
 
 /*============================================================================

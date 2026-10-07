@@ -3,9 +3,10 @@
  * @file           : ec_platform_stm32l051.c
  * @brief          : STM32L051 LL implementation of ec_platform.h
  *
- *   Clock:        MSI 2.097 MHz (default, Range 1, 0 WS)
- *   SysTick:      1 ms polling (TICKINT=0) — no SysTick interrupt
+ *   Clock:        HSI16 / 2 = 8 MHz HCLK/PCLK1/PCLK2, voltage range 1, 0 WS
+ *   SysTick:      1 ms interrupt timebase, disabled before STOP
  *   I2C1:         PB6=SCL, PB7=SDA, 100 kHz, open-drain
+ *   I2C2:         PB13=SCL, PB14=SDA, AF5 slave, host address 0x42
  *   USART2:       PA2=TX, 115200-8-N-1 (debug printf)
  *
  *   Pin map:
@@ -25,6 +26,7 @@
 
 #include "ec_platform.h"
 #include "bq27220.h"
+#include "ec_host_i2c.h"
 #include "stm32l0xx_conf.h"
 #include <stddef.h>
 #include <stdio.h>
@@ -56,11 +58,6 @@
 #define USART2_TX_PIN       LL_GPIO_PIN_2
 #define USART2_TX_AF        LL_GPIO_AF_4
 
-/* I2C2 pins (PB13=SCL, PB14=SDA) — reserved for Linux host, kept analog for now */
-#define I2C2_SCL_PIN        LL_GPIO_PIN_13
-#define I2C2_SDA_PIN        LL_GPIO_PIN_14
-#define I2C2_PINS           (LL_GPIO_PIN_13 | LL_GPIO_PIN_14)
-
 /*============================================================================
  * Static State
  *============================================================================*/
@@ -70,53 +67,86 @@ static volatile bool     s_services_suspended;
 static bool              s_usart2_ready;
 
 #define USART2_TIMEOUT_LOOPS 50000U
+#define CLOCK_TIMEOUT_LOOPS  50000U
 
 /* STOP wake flags — set from EXTI ISRs */
 static volatile uint32_t s_stop_wake_flags;
 
 /*============================================================================
- * Clock: MSI 2.097 MHz, Range 1, 0 wait states
+ * Clock: HSI16 SYSCLK, AHB / 2, APB1/APB2 / 1 -> 8 MHz, 0 wait states
  *============================================================================*/
 
 static bool clock_init(void)
 {
-    /*
-     * MSI is the default clock source after reset at 2.097 MHz (Range 1).
-     * No configuration needed — just set SystemCoreClock and flash latency.
-     */
+    uint32_t timeout = CLOCK_TIMEOUT_LOOPS;
+
+    /* ES0251 2.12.3: I2C2 kernel clock must be >=4 MHz for a Standard-mode
+     * transmitter with tSU;DAT=250 ns. PCLK1=8 MHz gives sampling margin.
+     * Use voltage range 1 so HSI tolerance cannot exceed the 0-WS limit. */
+    LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
+    LL_PWR_SetRegulVoltageScaling(LL_PWR_REGU_VOLTAGE_SCALE1);
+    while (LL_PWR_IsActiveFlag_VOS()) {
+        if (timeout-- == 0U) return false;
+    }
     LL_FLASH_SetLatency(LL_FLASH_LATENCY_0);
 
-    SystemCoreClock = 2097000U;
+    LL_RCC_HSI_Enable();
+    timeout = CLOCK_TIMEOUT_LOOPS;
+    while (!LL_RCC_HSI_IsReady()) {
+        if (timeout-- == 0U) return false;
+    }
+    LL_RCC_HSI_DisableDivider(); /* Disable HSI's separate /4 divider. */
+    timeout = CLOCK_TIMEOUT_LOOPS;
+    while ((RCC->CR & RCC_CR_HSIDIVF) != 0U) {
+        if (timeout-- == 0U) return false;
+    }
 
-    return true;
+    /* Set divisors before switching to the faster source. */
+    LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_2);
+    LL_RCC_SetAPB1Prescaler(LL_RCC_APB1_DIV_1);
+    LL_RCC_SetAPB2Prescaler(LL_RCC_APB2_DIV_1);
+    LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_HSI);
+    timeout = CLOCK_TIMEOUT_LOOPS;
+    while (LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_HSI) {
+        if (timeout-- == 0U) return false;
+    }
+
+    /* Keep MSI as the STOP wakeup source (also avoids ES0251 2.1.1 on rev A).
+     * Restore HSI16/2 in RestoreAfterStop before logging or resuming I2C. */
+    LL_RCC_SetClkAfterWakeFromStop(LL_RCC_STOP_WAKEUPCLOCK_MSI);
+    LL_RCC_HSI_DisableInStopMode();
+    LL_RCC_SetI2CClockSource(LL_RCC_I2C1_CLKSOURCE_PCLK1);
+    LL_RCC_SetUSARTClockSource(LL_RCC_USART2_CLKSOURCE_PCLK1);
+    SystemCoreClockUpdate();
+
+    return SystemCoreClock == 8000000U;
 }
 
 /*============================================================================
- * SysTick: 1 ms polling timebase (TICKINT=0)
+ * SysTick: 1 ms interrupt timebase
  *============================================================================*/
 
 static bool systick_init(void)
 {
     s_millis = 0U;
 
-    /*
-     * LL_Init1msTick configures SysTick for 1ms period.
-     * TICKINT=0 means no SysTick interrupt — we poll COUNTFLAG.
-     */
+    /* Count elapsed time even while gauge, UART, or display calls block.
+     * LL_mDelay() may still poll COUNTFLAG independently of this counter. */
     LL_Init1msTick(SystemCoreClock);
+    NVIC_SetPriority(SysTick_IRQn, 3U); /* Below EXTI (0) and I2C2 (1). */
+    SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk;
+    LL_SYSTICK_EnableIT();
 
     return true;
 }
 
+void SysTick_Handler(void)
+{
+    s_millis++;
+}
+
 uint32_t EC_Platform_Millis(void)
 {
-    /*
-     * Check COUNTFLAG each call. Since the main loop runs faster than
-     * 1 ms (no blocking delays), we catch every tick.
-     */
-    if ((SysTick->CTRL & SysTick_CTRL_COUNTFLAG_Msk) != 0U) {
-        s_millis++;
-    }
     return s_millis;
 }
 
@@ -166,9 +196,11 @@ static bool gpio_init(void)
     LL_GPIO_SetPinMode(PG_GPIO_PORT, PG_PIN, LL_GPIO_MODE_INPUT);
     LL_GPIO_SetPinPull(PG_GPIO_PORT, PG_PIN, LL_GPIO_PULL_UP);
 
-    /* ---- PB13/PB14: I2C2 pins, analog high-Z (reserved for Linux host) ---- */
-    LL_GPIO_SetPinMode(GPIOB, I2C2_PINS, LL_GPIO_MODE_ANALOG);
-    LL_GPIO_SetPinPull(GPIOB, I2C2_PINS, LL_GPIO_PULL_NO);
+    /* PB13/PB14 stay high-Z until EC_HostI2C_Init configures AF5 open-drain. */
+    LL_GPIO_SetPinMode(GPIOB, LL_GPIO_PIN_13, LL_GPIO_MODE_ANALOG);
+    LL_GPIO_SetPinMode(GPIOB, LL_GPIO_PIN_14, LL_GPIO_MODE_ANALOG);
+    LL_GPIO_SetPinPull(GPIOB, LL_GPIO_PIN_13, LL_GPIO_PULL_NO);
+    LL_GPIO_SetPinPull(GPIOB, LL_GPIO_PIN_14, LL_GPIO_PULL_NO);
 
     return true;
 }
@@ -252,10 +284,10 @@ void EC_Platform_Usart2Init(void)
     LL_USART_SetOverSampling(USART2, LL_USART_OVERSAMPLING_16);
 
     /*
-     * PCLK = HCLK = 2.097 MHz.
-     * BRR for 115200 bps @ 2.097 MHz, OVER8=0:
-     *   BRR = 2097000 / 115200 ≈ 18.2 → BRR = 18.
-     *   Actual rate = 2097000 / 18 = 116500 bps, error = +1.13%.
+     * PCLK1 = HCLK = 8 MHz.
+     * BRR for 115200 bps @ 8 MHz, OVER8=0:
+     *   BRR = 8000000 / 115200 ≈ 69.4 → BRR = 69.
+     *   Nominal rate = 8000000 / 69 ≈ 115942 bps, error = +0.64%.
      *   Acceptable for debug output (tolerance typically ±3%).
      */
     LL_USART_SetBaudRate(USART2, SystemCoreClock, LL_USART_OVERSAMPLING_16, 115200U);
@@ -316,13 +348,29 @@ int __io_getchar(void)
  * System Init
  *============================================================================*/
 
+static void print_host_i2c_diagnostics(void)
+{
+    printf("[I2C2] HCLK/PCLK1=%lu Hz CR1=0x%08lX OAR1=0x%08lX ISR=0x%08lX TIMINGR=0x%08lX\r\n",
+        (unsigned long)SystemCoreClock, (unsigned long)I2C2->CR1,
+        (unsigned long)I2C2->OAR1, (unsigned long)I2C2->ISR,
+        (unsigned long)I2C2->TIMINGR);
+    printf("[I2C2] GPIOB MODER=0x%08lX OTYPER=0x%08lX PUPDR=0x%08lX AFRH=0x%08lX SCL=%lu SDA=%lu\r\n",
+        (unsigned long)GPIOB->MODER, (unsigned long)GPIOB->OTYPER,
+        (unsigned long)GPIOB->PUPDR, (unsigned long)GPIOB->AFR[1],
+        (unsigned long)(LL_GPIO_IsInputPinSet(GPIOB, LL_GPIO_PIN_13) != 0U),
+        (unsigned long)(LL_GPIO_IsInputPinSet(GPIOB, LL_GPIO_PIN_14) != 0U));
+    printf("[I2C2] PRIMASK=%lu IRQ_EN=%lu IRQ_PENDING=%lu APB1ENR=0x%08lX\r\n",
+        (unsigned long)__get_PRIMASK(), (unsigned long)NVIC_GetEnableIRQ(I2C2_IRQn),
+        (unsigned long)NVIC_GetPendingIRQ(I2C2_IRQn), (unsigned long)RCC->APB1ENR);
+}
+
 bool EC_Platform_Init(void)
 {
     s_millis = 0U;
     s_services_suspended = false;
     s_stop_wake_flags = 0U;
 
-    /* 1. Clock (MSI 2.097 MHz) */
+    /* 1. Clock (HSI16 / 2 = 8 MHz) */
     if (!clock_init()) {
         return false;
     }
@@ -332,7 +380,7 @@ bool EC_Platform_Init(void)
         return false;
     }
 
-    /* 3. SysTick (1ms polling) */
+    /* 3. SysTick (1 ms interrupt timebase) */
     if (!systick_init()) {
         return false;
     }
@@ -345,6 +393,10 @@ bool EC_Platform_Init(void)
         /* I2C1 init failed — gauge will be NO_GAUGE, but platform init
            is still "successful" because the system can operate without gauge */
     }
+
+    /* 6. I2C2 slave for telemetry and delayed host load-off commands. */
+    EC_HostI2C_Init();
+    print_host_i2c_diagnostics();
 
     return true;
 }
@@ -377,6 +429,8 @@ void EXTI4_15_IRQHandler(void)
 
 void EC_Platform_PrepareStopWake(void)
 {
+    uint32_t mask = __get_PRIMASK();
+    __disable_irq();
     /* Enable SYSCFG clock (needed for EXTI source selection) */
     LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SYSCFG);
 
@@ -394,6 +448,8 @@ void EC_Platform_PrepareStopWake(void)
 
     /* Clear any stale EXTI pending flags */
     LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_0 | LL_EXTI_LINE_13);
+    NVIC_ClearPendingIRQ(EXTI0_1_IRQn);
+    NVIC_ClearPendingIRQ(EXTI4_15_IRQn);
 
     /* Clear PWR wakeup flag */
     LL_PWR_ClearFlag_WU();
@@ -407,11 +463,11 @@ void EC_Platform_PrepareStopWake(void)
     NVIC_SetPriority(EXTI0_1_IRQn, 0U);
     NVIC_SetPriority(EXTI4_15_IRQn, 0U);
 
-    /* Mark services as suspended */
-    s_services_suspended = true;
+    s_services_suspended = false;
+    __set_PRIMASK(mask);
 }
 
-void EC_Platform_EnterStop(void)
+bool EC_Platform_EnterStop(void)
 {
     /*
      * Enter STOP mode with WFI.
@@ -423,26 +479,56 @@ void EC_Platform_EnterStop(void)
      *   - GPIO outputs maintain their state (PA1 stays LOW, LEDs stay OFF)
      *   - Wake on EXTI (PA0 or PC13 falling edge) or NVIC pending
      *
-     * The critical race condition on Cortex-M0+:
-     *   If an edge occurs between our final check and WFI, the EXTI pending
-     *   bit is latched in hardware, and WFI returns immediately.
-     *   This is handled by the caller's two-stage check (PrepareStopWake →
-     *   check pins → EnterStop), plus the EXTI pending bits.
+     * Mask IRQ delivery from the final activity check through WFI. Otherwise
+     * an EXTI ISR could run and clear the only wake edge just before WFI.
+     * WFI still wakes for an interrupt pending under PRIMASK; the handler
+     * runs after we clear SLEEPDEEP and restore the caller's mask.
      */
+
+    uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    /* Also catch short pulses already serviced since PrepareStopWake. */
+    if (EC_Platform_IsPowerKeyPressed() || EC_Platform_IsPgActive() ||
+        s_stop_wake_flags != 0U ||
+        LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_0) ||
+        LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_13)) {
+        __set_PRIMASK(mask);
+        return false;
+    }
+
+    /* I2C2 has no STOP wakeup support. Cancel if a transaction began after
+     * the state machine's eligibility check; otherwise release its pins. */
+    if (!EC_HostI2C_Suspend()) {
+        __set_PRIMASK(mask);
+        return false;
+    }
+    s_services_suspended = true;
+
+    /* ES0251 2.12.2: both I2C peripherals must have PE=0 in STOP.
+     * Gauge polling has completed; RestoreAfterStop reinitializes I2C1. */
+    LL_I2C_Disable(I2C1);
 
     /* Set SLEEPDEEP for STOP mode (not SLEEP) */
     LL_PWR_SetRegulModeLP(LL_PWR_REGU_LPMODES_LOW_POWER);
     SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
 
+    /* A periodic tick must not wake STOP or leave a pending tick at WFI. */
+    LL_SYSTICK_DisableIT();
+    SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk;
+    __DSB();
     __WFI();
 
     /* Clear SLEEPDEEP after wake */
     SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
+    __set_PRIMASK(mask);
+    return true;
 }
 
 void EC_Platform_SampleStopCutoff(bool *key_low, bool *pg_low,
                                    bool *key_pending, bool *pg_pending)
 {
+    uint32_t mask = __get_PRIMASK();
+    __disable_irq();
     /*
      * 1. Read cutoff levels: sample KEY/PG BEFORE disabling EXTI.
      *    If KEY is LOW at this point, it may or may not be the wake source.
@@ -459,11 +545,17 @@ void EC_Platform_SampleStopCutoff(bool *key_low, bool *pg_low,
      * 2. Read pending flags before clearing.
      *    KEY pending = bit0 in s_stop_wake_flags.
      *    PG pending  = bit1 in s_stop_wake_flags.
-     *    These were set by the EXTI ISRs that fired during STOP wakeup.
-     *    By reading s_stop_wake_flags BEFORE disabling EXTI, we capture
-     *    the true edge-triggered evidence.
+     *    Include hardware pending bits when the IRQ has not executed yet.
+     *    Mask IRQ delivery so an ISR cannot clear PR after the software
+     *    flags were sampled but before hardware evidence was collected.
      */
     uint32_t flags = s_stop_wake_flags;
+    if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_0)) {
+        flags |= 1U;
+    }
+    if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_13)) {
+        flags |= 2U;
+    }
 
     if (key_pending != NULL) {
         *key_pending = ((flags & 1U) != 0U);
@@ -485,12 +577,15 @@ void EC_Platform_SampleStopCutoff(bool *key_low, bool *pg_low,
 
     /* Clear any remaining EXTI pending */
     LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_0 | LL_EXTI_LINE_13);
+    NVIC_ClearPendingIRQ(EXTI0_1_IRQn);
+    NVIC_ClearPendingIRQ(EXTI4_15_IRQn);
 
     /* Clear PWR wakeup flag */
     LL_PWR_ClearFlag_WU();
 
     /* Clear internal wake flags for next STOP cycle */
     s_stop_wake_flags = 0U;
+    __set_PRIMASK(mask);
 }
 
 bool EC_Platform_ServicesWereSuspended(void)
@@ -505,11 +600,12 @@ bool EC_Platform_ServicesWereSuspended(void)
 bool EC_Platform_RestoreAfterStop(void)
 {
     /*
-     * MSI restarts automatically on STM32L0 wakeup from STOP.
-     * Just update SystemCoreClock and re-init SysTick.
+     * STOP wakes on MSI with the retained AHB divider. Restore HSI16/2 before
+     * SysTick, I2C2, or debug output resumes; 2.097 MHz is not the run clock.
      */
-    SystemCoreClockUpdate();
-    SystemCoreClock = 2097000U;
+    if (!clock_init()) {
+        return false;
+    }
 
     /* Re-init SysTick for 1ms timebase */
     if (!systick_init()) {
@@ -520,6 +616,10 @@ bool EC_Platform_RestoreAfterStop(void)
     LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
     LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOB);
     LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOC);
+
+    /* Make the cached slave interface available before I2C1 bus recovery,
+     * which may delay wake restoration. The ISR never accesses I2C1. */
+    EC_HostI2C_Init();
 
     /*
      * Restore I2C1 physical configuration.
@@ -538,6 +638,8 @@ bool EC_Platform_RestoreAfterStop(void)
          * NO_GAUGE: continues to not access Gauge.
          */
     }
+
+    print_host_i2c_diagnostics();
 
     /* Clear services suspended flag */
     s_services_suspended = false;

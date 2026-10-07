@@ -31,13 +31,13 @@ extern "C" {
  *============================================================================*/
 
 /**
- * @brief  Full platform init: clock + GPIO + SysTick + I2C1.
+ * @brief  Full platform init: clock + GPIO + SysTick + I2C1 + I2C2 slave.
  *         Returns true if all critical subsystems initialized.
  */
 bool EC_Platform_Init(void);
 
 /**
- * @brief  Restore clock, SysTick, GPIO, and I2C1 after STOP wakeup.
+ * @brief  Restore clock, SysTick, GPIO, I2C1 and I2C2 after STOP wakeup.
  *         Only called if running services were actually suspended.
  * @return true on success. On failure, caller should force PA1 LOW and reset.
  */
@@ -48,9 +48,9 @@ bool EC_Platform_RestoreAfterStop(void);
  *============================================================================*/
 
 /**
- * @brief  Monotonic millisecond counter.
- *         Uses SysTick COUNTFLAG polling — main loop must call this
- *         frequently enough to catch every 1ms tick.
+ * @brief  Millisecond counter updated by SysTick IRQ, including time spent
+ *         in blocking gauge/UART/display calls. Safe to read from I2C2 IRQ.
+ *         Naturally wraps at UINT32_MAX; resets when STOP services restart.
  */
 uint32_t EC_Platform_Millis(void);
 
@@ -92,7 +92,7 @@ int  EC_Platform_Putchar(int ch);
  *         - Configure PA0 (KEY) and PC13 (PG) as falling-edge EXTI
  *         - Clear EXTI and PWR pending flags
  *         - Enable NVIC for EXTI IRQs
- *         - Set "services suspended" flag
+ *         Running services are suspended only by EC_Platform_EnterStop().
  */
 void EC_Platform_PrepareStopWake(void);
 
@@ -100,8 +100,10 @@ void EC_Platform_PrepareStopWake(void);
  * @brief  Execute STOP mode via WFI with SLEEPDEEP.
  *         Blocks until a wakeup event occurs, then returns.
  *         Caller must have called EC_Platform_PrepareStopWake() first.
+ * @return false if KEY/PG activity or host I2C work prevents STOP;
+ *         true after WFI. Preserves the caller's interrupt mask.
  */
-void EC_Platform_EnterStop(void);
+bool EC_Platform_EnterStop(void);
 
 /**
  * @brief  Sample the STOP cutoff point:

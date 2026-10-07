@@ -41,6 +41,8 @@ target_sources(${PROJECT_NAME} PRIVATE
   # EC platform and state machine
   "${CMAKE_CURRENT_SOURCE_DIR}/Src/ec_platform_stm32l051.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/Src/ec_state_machine.c"
+  # I2C2 telemetry and delayed load-off control for the host
+  "${CMAKE_CURRENT_SOURCE_DIR}/Src/ec_host_i2c.c"
   # LL Utils (SysTick delay functions)
   "${CMAKE_CURRENT_SOURCE_DIR}/../STM32CubeL0/Drivers/STM32L0xx_HAL_Driver/Src/stm32l0xx_ll_utils.c"
 )
@@ -116,4 +118,13 @@ target_link_directories(${PROJECT_NAME} PRIVATE
 # Add additional linker libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE
   # Add additional linker libraries here
+)
+
+# Keep the flashable binary synchronized with each newly linked ELF.
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+  COMMAND "${CMAKE_OBJCOPY}" -O binary "$<TARGET_FILE:${PROJECT_NAME}>"
+          "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.bin"
+  BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.bin"
+  COMMENT "Generating ${PROJECT_NAME}.bin from the current ELF"
+  VERBATIM
 )

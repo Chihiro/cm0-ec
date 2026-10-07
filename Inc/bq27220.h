@@ -38,7 +38,7 @@ extern "C" {
 #define BQ27220_I2C_ADDR          (0x55U << 1U)  /* SADD[7:1] = 0x55 */
 
 /*
- * Conservative Standard-mode timing @ 8 MHz PCLK (~80 kHz):
+ * Conservative Standard-mode timing @ 8 MHz PCLK (~62 kHz):
  *   PRESC=0  → t_presc = 125 ns
  *   SCLDEL=3 → t_SU;DAT = 500 ns
  *   SDADEL=0 → t_HD;DAT = 0 ns (analog filter provides hold)
@@ -91,14 +91,12 @@ extern "C" {
 #define BQ27220_CMD_MAC_DATA_SUM        0x60U
 
 /*============================================================================
- * BatteryStatus bit definitions (Table 2-4 of TRM)
+ * BatteryStatus bit definitions (Table 2-6 of TRM SLUUBD4A)
  *============================================================================*/
 #define BQ27220_BATTSTAT_DSG            (1U << 0)   /* Discharging detected */
-#define BQ27220_BATTSTAT_FC             (1U << 3)   /* Fully charged */
-#define BQ27220_BATTSTAT_CHG_INH        (1U << 4)   /* Charge inhibited */
-#define BQ27220_BATTSTAT_SOCF           (1U << 10)  /* SOC final (SOC<EDV2) */
-#define BQ27220_BATTSTAT_SOC1           (1U << 11)  /* SOC1 threshold */
-#define BQ27220_BATTSTAT_TDA            (1U << 14)  /* Terminate discharge alarm */
+#define BQ27220_BATTSTAT_FC             (1U << 9)   /* Fully charged */
+#define BQ27220_BATTSTAT_CHG_INH        (1U << 8)   /* Charge inhibited */
+#define BQ27220_BATTSTAT_TDA            (1U << 2)   /* Terminate discharge alarm */
 
 /*============================================================================
  * OperationStatus bit definitions (Table 2-5 of TRM)
@@ -212,6 +210,12 @@ bool BQ27220_ReadCurrent(int16_t *current_ma);
  * @brief  Read average current in mA.
  */
 bool BQ27220_ReadAverageCurrent(int16_t *current_ma);
+
+/** @brief Predicted minutes to empty; 0xFFFF = not discharging. */
+bool BQ27220_ReadTimeToEmpty(uint16_t *minutes);
+
+/** @brief Predicted minutes to full; 0xFFFF = not charging. */
+bool BQ27220_ReadTimeToFull(uint16_t *minutes);
 
 /**
  * @brief  Read BatteryStatus register.

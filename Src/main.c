@@ -4,7 +4,7 @@
  * @brief          : EC Power Management v8.0 — entry point.
  *
  *   MCU:  STM32L051C8T6
- *   Clock: MSI 2.097 MHz
+ *   Clock: HSI16 / 2 = 8 MHz HCLK/PCLK1
  *   USART2: PA2 TX, 115200-8-N-1 (debug output)
  ******************************************************************************
  */
@@ -19,7 +19,7 @@ int main(void)
 {
     /*
      * EC_Init() internally calls EC_Platform_Init() which sets up
-     * clock → GPIO → SysTick → USART2 → I2C1, then runs gauge BOOT.
+     * clock → GPIO → SysTick → USART2 → I2C1 → I2C2 slave, then gauge BOOT.
      * printf works after USART2 init inside EC_Platform_Init().
      */
     /* Initialize platform and USART2 before any printf. */
@@ -28,7 +28,7 @@ int main(void)
     printf("\r\n");
     printf("========================================\r\n");
     printf("  EC Power Management v8.0\r\n");
-    printf("  STM32L051C8T6 | MSI 2.097 MHz\r\n");
+    printf("  STM32L051C8T6 | HSI16/2, HCLK/PCLK1 8 MHz\r\n");
     printf("  USART2: 115200-8-N-1\r\n");
     printf("========================================\r\n\n");
 

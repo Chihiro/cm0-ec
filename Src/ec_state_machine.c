@@ -10,6 +10,7 @@
  *     - Per-cycle status print (voltage, current, SOC, PG) at ≤1 Hz
  *     - STOP with strict KEY/PG wakeup evidence rules
  *     - 10 s idle timer for STOP entry
+ *     - I2C2 host command: delayed PA1 load-off, seconds supplied by host
  *
  *   Design rules:
  *     - No fixed delays — all timing via EC_Platform_Millis() differences
@@ -25,6 +26,7 @@
 #include "ec_platform.h"
 #include "bq27220.h"
 #include "oled_display.h"
+#include "ec_host_i2c.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -88,6 +90,19 @@ typedef struct {
     bool          voltage_valid;
     int16_t       current_ma;    /* Instantaneous current in mA (+charge, -discharge) */
     bool          current_valid;
+    bool          average_current_valid;
+    int16_t       average_current_ma;
+    bool          remaining_capacity_valid;
+    uint16_t      remaining_capacity_mah;
+    bool          full_charge_capacity_valid;
+    uint16_t      full_charge_capacity_mah;
+    bool          battery_status_valid;
+    uint16_t      battery_status;
+    bool          time_to_empty_valid;
+    uint16_t      time_to_empty_min;
+    bool          time_to_full_valid;
+    uint16_t      time_to_full_min;
+    uint32_t      sample_sequence;
 } ec_soc_t;
 
 typedef struct {
@@ -106,6 +121,9 @@ typedef struct {
 
     uint32_t last_activity_ms;   /* Last event that resets idle timer */
     uint32_t last_command_ms;    /* Last BQ27220 standard command timestamp */
+    bool power_off_pending;
+    uint32_t power_off_received_ms;
+    uint32_t power_off_delay_ms;
 
     uint32_t anomaly_count;      /* Unexplained STOP wakeups (diagnostic) */
 } ec_ctx_t;
@@ -404,6 +422,28 @@ static void display_refresh(uint32_t now)
  *   - Status printed every cycle: V, I, SOC%, PG state, load state
  *============================================================================*/
 
+static void host_publish(bool force)
+{
+    static uint32_t last_sequence;
+    static ec_state_t last_state;
+    static ec_gauge_mode_t last_mode;
+    static bool last_pg;
+    static bool last_power_off_pending;
+
+    if (force || last_sequence != g_ec.soc.sample_sequence ||
+        last_state != g_ec.state || last_mode != g_ec.gauge_mode ||
+        last_pg != g_ec.pg.stable || last_power_off_pending != g_ec.power_off_pending) {
+        ec_status_t st;
+        EC_GetStatus(&st);
+        EC_HostI2C_Publish(&st);
+        last_sequence = g_ec.soc.sample_sequence;
+        last_state = g_ec.state;
+        last_mode = g_ec.gauge_mode;
+        last_pg = g_ec.pg.stable;
+        last_power_off_pending = g_ec.power_off_pending;
+    }
+}
+
 static void soc_schedule(uint32_t now)
 {
     if (g_ec.gauge_mode != EC_GAUGE_NORMAL) {
@@ -469,6 +509,18 @@ static void soc_schedule(uint32_t now)
         g_ec.soc.full = false;
         g_ec.soc.color = EC_COLOR_OFF;
     }
+
+    /* Host telemetry: each field has independent validity. No I2C1 access
+     * happens in the I2C2 ISR; it keeps serving the previous complete sample. */
+    g_ec.soc.average_current_valid = BQ27220_ReadAverageCurrent(&g_ec.soc.average_current_ma);
+    g_ec.soc.remaining_capacity_valid = BQ27220_ReadRemainingCapacity(&g_ec.soc.remaining_capacity_mah);
+    g_ec.soc.full_charge_capacity_valid = BQ27220_ReadFullChargeCapacity(&g_ec.soc.full_charge_capacity_mah);
+    g_ec.soc.battery_status_valid = BQ27220_ReadBatteryStatus(&g_ec.soc.battery_status);
+    g_ec.soc.time_to_empty_valid = BQ27220_ReadTimeToEmpty(&g_ec.soc.time_to_empty_min)
+                              && g_ec.soc.time_to_empty_min != UINT16_MAX;
+    g_ec.soc.time_to_full_valid = BQ27220_ReadTimeToFull(&g_ec.soc.time_to_full_min)
+                             && g_ec.soc.time_to_full_min != UINT16_MAX;
+    g_ec.soc.sample_sequence++;
 
     /* ---- Print comprehensive status every polling cycle ---- */
     {
@@ -541,6 +593,12 @@ static bool stop_should_enter(uint32_t now)
         return false;
     }
 
+    /* A live transfer prevents STOP. The main-loop health check observes
+     * and recovers abandoned transfers independently of the load state. */
+    if (EC_HostI2C_IsBusy()) {
+        return false;
+    }
+
     return true;
 }
 
@@ -586,20 +644,20 @@ static void stop_execute(uint32_t now)
      * 3. Prepare wake sources: enable KEY/PG falling edge EXTI.
      */
     EC_Platform_PrepareStopWake();
-    actually_suspended = true;
 
     /*
      * 4. Second pre-check: activity during preparation?
      *    (EXTI pending would be set if an edge occurred during setup)
      */
-    if (EC_Platform_IsPowerKeyPressed()) {
-        /* Activity detected during prep — cancel STOP.
-         * Per spec: do NOT restore not-yet-suspended services. */
-        refresh_activity(now);
-        return;
-    }
-    if (EC_Platform_IsPgActive()) {
-        pg_force(true, now);
+    bool key_during_prep = EC_Platform_IsPowerKeyPressed();
+    bool pg_during_prep = EC_Platform_IsPgActive();
+    if (key_during_prep || pg_during_prep) {
+        /* Undo wake-source preparation even when no services were suspended. */
+        bool key_low, pg_low, key_pending, pg_pending;
+        EC_Platform_SampleStopCutoff(&key_low, &pg_low, &key_pending, &pg_pending);
+        if (pg_during_prep) {
+            pg_force(true, now);
+        }
         refresh_activity(now);
         return;
     }
@@ -615,8 +673,8 @@ static void stop_execute(uint32_t now)
     EC_Platform_SetLedGreen(false);
     EC_Platform_SetLedBlue(false);
     OLED_Display_Sleep();   /* panel + charge pump off for lowest power */
-    EC_Platform_EnterStop();
-    LOG("[STOP] Woke from STOP");
+    bool entered_stop = EC_Platform_EnterStop();
+    actually_suspended = EC_Platform_ServicesWereSuspended();
 
     /*
      * 6. Sample cutoff point.
@@ -629,12 +687,6 @@ static void stop_execute(uint32_t now)
 
     EC_Platform_SampleStopCutoff(&key_cutoff_low, &pg_cutoff_low,
                                   &key_pending, &pg_pending);
-
-    LOG("[STOP] Cutoff: KEY=%s PG=%s  Pending: KEY=%s PG=%s",
-        key_cutoff_low ? "LOW" : "HIGH",
-        pg_cutoff_low ? "LOW" : "HIGH",
-        key_pending ? "YES" : "no",
-        pg_pending ? "YES" : "no");
 
     /*
      * 7. Restore system services (only if actually suspended).
@@ -653,8 +705,21 @@ static void stop_execute(uint32_t now)
     /* Re-read millis after STOP (SysTick was re-initialized) */
     now = EC_Platform_Millis();
 
+    /* USART2 uses PCLK1: print only after the run clock has been restored. */
+    LOG("[STOP] %s", entered_stop ? "Woke from STOP" : "Cancelled: activity or host I2C pending");
+    LOG("[STOP] Cutoff: KEY=%s PG=%s  Pending: KEY=%s PG=%s",
+        key_cutoff_low ? "LOW" : "HIGH",
+        pg_cutoff_low ? "LOW" : "HIGH",
+        key_pending ? "YES" : "no",
+        pg_pending ? "YES" : "no");
+
     /* Wake the OLED now that I2C1 has been re-initialized by RestoreAfterStop */
     OLED_Display_Wake();
+
+    if (!entered_stop) {
+        refresh_activity(now);
+        return;
+    }
 
     /*
      * 8. Build wake evidence.
@@ -717,11 +782,58 @@ static void stop_execute(uint32_t now)
  * State Handlers
  *============================================================================*/
 
+static bool host_power_off_update(void)
+{
+    ec_host_power_off_request_t request;
+    bool already_off_request = false;
+    bool received = EC_HostI2C_TakePowerOffRequest(&request);
+    if (received) {
+        if (g_ec.state == EC_STATE_LOAD_RUNNING) {
+            g_ec.power_off_pending = true;
+            g_ec.power_off_received_ms = request.received_ms;
+            g_ec.power_off_delay_ms = (uint32_t)request.delay_seconds * 1000U;
+        } else {
+            /* An OFF command must not turn into a timer for the next boot. */
+            g_ec.power_off_pending = false;
+            already_off_request = true;
+        }
+    }
+
+    /* A STOP IRQ can publish a timestamp newer than EC_Task's initial now. */
+    uint32_t now = EC_Platform_Millis();
+    if (!already_off_request && (!g_ec.power_off_pending ||
+        !time_elapsed(now, g_ec.power_off_received_ms, g_ec.power_off_delay_ms))) {
+        if (received) {
+            LOG("[HOST] LOAD OFF requested, delay=%u s", (unsigned)request.delay_seconds);
+        }
+        return false;
+    }
+
+    EC_Platform_SetLoadEnabled(false);
+    g_ec.state = EC_STATE_ACTIVE_IDLE;
+    g_ec.power_off_pending = false;
+    /* Discard a concurrent long press; a held key must be released before
+     * it can start a fresh press to turn the load back on. */
+    g_ec.key.armed = !g_ec.key.raw && !g_ec.key.stable;
+    g_ec.key.timing = false;
+    g_ec.key.long_event = false;
+    g_ec.key.short_event = false;
+    refresh_activity(now);
+    host_publish(true);
+    if (received && !already_off_request) {
+        LOG("[HOST] LOAD OFF requested, delay=%u s", (unsigned)request.delay_seconds);
+    }
+    LOG("[STATE] Host command -> LOAD OFF (PA1 LOW)");
+    display_refresh(now);
+    return true;
+}
+
 static void handle_active_idle(uint32_t now)
 {
     /* Long press → enable load */
     if (key_take_long_event()) {
         LOG("[STATE] Long-press → LOAD ON (PA1 HIGH)");
+        g_ec.power_off_pending = false;
         EC_Platform_SetLoadEnabled(true);
         g_ec.state = EC_STATE_LOAD_RUNNING;
         refresh_activity(now);
@@ -734,6 +846,7 @@ static void handle_load_running(uint32_t now)
     /* Long press → disable load (direct PA1 LOW, no Linux ACK) */
     if (key_take_long_event()) {
         LOG("[STATE] Long-press → LOAD OFF (PA1 LOW)");
+        g_ec.power_off_pending = false;
         EC_Platform_SetLoadEnabled(false);
         g_ec.state = EC_STATE_ACTIVE_IDLE;
         refresh_activity(now);
@@ -771,9 +884,26 @@ void EC_Init(void)
     g_ec.soc.voltage_valid = false;
     g_ec.soc.current_ma = 0;
     g_ec.soc.current_valid = false;
+    g_ec.soc.average_current_valid = false;
+    g_ec.soc.average_current_ma = 0;
+    g_ec.soc.remaining_capacity_valid = false;
+    g_ec.soc.remaining_capacity_mah = 0U;
+    g_ec.soc.full_charge_capacity_valid = false;
+    g_ec.soc.full_charge_capacity_mah = 0U;
+    g_ec.soc.battery_status_valid = false;
+    g_ec.soc.battery_status = 0U;
+    g_ec.soc.time_to_empty_valid = false;
+    g_ec.soc.time_to_empty_min = UINT16_MAX;
+    g_ec.soc.time_to_full_valid = false;
+    g_ec.soc.time_to_full_min = UINT16_MAX;
+    g_ec.soc.sample_sequence = 0U;
     g_ec.display.last_refresh_ms = 0U;
     g_ec.last_command_ms = 0U;
     g_ec.anomaly_count = 0U;
+    g_ec.power_off_pending = false;
+    g_ec.power_off_received_ms = 0U;
+    g_ec.power_off_delay_ms = 0U;
+    host_publish(true); /* Invalid telemetry is readable during gauge BOOT. */
 
     /* 1. Platform init: clock, GPIO (PA1 LOW, LEDs OFF), SysTick, I2C1 */
     if (!EC_Platform_Init()) {
@@ -784,7 +914,7 @@ void EC_Init(void)
         EC_Platform_SystemReset();
         return;
     }
-    LOG("[INIT] Platform init OK (clock=MSI 2.1MHz, GPIO, SysTick, USART2, I2C1)");
+    LOG("[INIT] Platform init OK (HSI16/2, HCLK/PCLK1=8MHz, GPIO, SysTick, USART2, I2C1, I2C2 slave 0x42)");
 
     now = EC_Platform_Millis();
 
@@ -800,6 +930,8 @@ void EC_Init(void)
         LOG("[INIT] Gauge BOOT: NO_GAUGE (init failed, no further gauge access)");
     }
 
+    /* Gauge BOOT and summary output take real time with the IRQ timebase. */
+    now = EC_Platform_Millis();
     /* Update command guard from BOOT activity */
     g_ec.last_command_ms = now;
 
@@ -831,22 +963,24 @@ void EC_Init(void)
     EC_Platform_SetLoadEnabled(false);
     g_ec.state = EC_STATE_ACTIVE_IDLE;
     LOG("[INIT] Entering ACTIVE_IDLE (load OFF). Boot complete.");
+    host_publish(true);
 }
 
 /*============================================================================
  * EC_Task — Main Loop Iteration
  *
- * Called continuously. Returns after each iteration — never blocks
- * except during STOP (which is a synchronous sleep within the iteration).
+ * Called continuously. Gauge, UART, and OLED calls can block; the SysTick
+ * interrupt continues counting their elapsed time. STOP sleeps synchronously.
  *
  * Order within each iteration:
  *   1. Read current time
  *   2. Update PG filter (poll raw, apply 200ms debounce)
  *   3. Update KEY debounce (poll raw, apply 30ms debounce)
- *   4. Check STOP eligibility (BEFORE SOC scheduling, per spec §9.1)
- *   5. Schedule SOC read (if NORMAL and conditions met)
- *   6. Update LED outputs
- *   7. Dispatch state handler
+ *   4. Accept host writes and check the load-off deadline
+ *   5. Check STOP eligibility (BEFORE SOC scheduling, per spec §9.1)
+ *   6. Schedule SOC read (if NORMAL and conditions met)
+ *   7. Re-check host writes/deadline after blocking I/O
+ *   8. Update LED outputs and dispatch state handler
  *============================================================================*/
 
 void EC_Task(void)
@@ -856,6 +990,12 @@ void EC_Task(void)
     /* 1. Update inputs */
     pg_update(now);
     key_update(now);
+    bool host_power_off_applied = host_power_off_update();
+    /* A stalled bus after wake also needs recovery while the load is ON;
+     * waiting for STOP eligibility leaves the host unable to read forever. */
+    (void)EC_HostI2C_RecoverStalled();
+    /* The host handler can refresh activity after an intervening tick. */
+    now = EC_Platform_Millis();
 
     /* 2. Check STOP eligibility (before SOC scheduling!) */
     if (stop_should_enter(now)) {
@@ -867,19 +1007,26 @@ void EC_Task(void)
     /* 3. Schedule SOC read (NORMAL mode only) */
     soc_schedule(now);
 
+    /* A host write or the deadline may arrive during blocking gauge reads. */
+    now = EC_Platform_Millis();
+    host_power_off_applied |= host_power_off_update();
+    now = EC_Platform_Millis();
+
     /* 4. Update LED outputs (every iteration — no fixed delay) */
     led_apply(now);
 
     /* 5. Dispatch state handler */
-    switch (g_ec.state) {
-    case EC_STATE_ACTIVE_IDLE:
-        handle_active_idle(now);
-        break;
-    case EC_STATE_LOAD_RUNNING:
-        handle_load_running(now);
-        break;
-    default:
-        break;
+    if (!host_power_off_applied) {
+        switch (g_ec.state) {
+        case EC_STATE_ACTIVE_IDLE:
+            handle_active_idle(now);
+            break;
+        case EC_STATE_LOAD_RUNNING:
+            handle_load_running(now);
+            break;
+        default:
+            break;
+        }
     }
 
     /* 6. OLED: short press advances page; 1 s timer redraws current page */
@@ -889,6 +1036,8 @@ void EC_Task(void)
     if (time_elapsed(now, g_ec.display.last_refresh_ms, DISPLAY_REFRESH_MS)) {
         display_refresh(now);
     }
+
+    host_publish(false);
 }
 
 /*============================================================================
@@ -919,5 +1068,19 @@ void EC_GetStatus(ec_status_t *out)
     out->voltage_mv    = g_ec.soc.voltage_mv;
     out->current_valid = g_ec.soc.current_valid;
     out->current_ma    = g_ec.soc.current_ma;
+    out->average_current_valid = g_ec.soc.average_current_valid;
+    out->average_current_ma = g_ec.soc.average_current_ma;
+    out->remaining_capacity_valid = g_ec.soc.remaining_capacity_valid;
+    out->remaining_capacity_mah = g_ec.soc.remaining_capacity_mah;
+    out->full_charge_capacity_valid = g_ec.soc.full_charge_capacity_valid;
+    out->full_charge_capacity_mah = g_ec.soc.full_charge_capacity_mah;
+    out->battery_status_valid = g_ec.soc.battery_status_valid;
+    out->battery_status = g_ec.soc.battery_status;
+    out->time_to_empty_valid = g_ec.soc.time_to_empty_valid;
+    out->time_to_empty_min = g_ec.soc.time_to_empty_min;
+    out->time_to_full_valid = g_ec.soc.time_to_full_valid;
+    out->time_to_full_min = g_ec.soc.time_to_full_min;
+    out->sample_sequence = g_ec.soc.sample_sequence;
     out->pg_active     = pg_is_stable_active();
+    out->power_off_pending = g_ec.power_off_pending;
 }

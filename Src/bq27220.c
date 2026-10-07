@@ -128,7 +128,7 @@ bool BQ27220_Init(void)
     LL_APB1_GRP1_ReleaseReset(LL_APB1_GRP1_PERIPH_I2C1);
     for (volatile uint32_t d = 0U; d < 100U; d++) { __NOP(); }
 
-    /* Timing: ~100 kHz Standard-mode @ 8 MHz PCLK */
+    /* Timing: ~62 kHz Standard-mode @ 8 MHz PCLK */
     LL_I2C_SetTiming(I2C1, BQ27220_I2C_TIMING);
 
     /* Master mode, 7-bit addressing, I2C protocol */
@@ -429,6 +429,8 @@ bool BQ27220_ReadRemainingCapacity(uint16_t *c) { return BQ27220_ReadWord(BQ2722
 bool BQ27220_ReadFullChargeCapacity(uint16_t *c) { return BQ27220_ReadWord(BQ27220_CMD_FULL_CHARGE_CAPACITY, c); }
 bool BQ27220_ReadCurrent(int16_t *c)        { return BQ27220_ReadWord(BQ27220_CMD_CURRENT, (uint16_t *)c); }
 bool BQ27220_ReadAverageCurrent(int16_t *c) { return BQ27220_ReadWord(BQ27220_CMD_AVERAGE_CURRENT, (uint16_t *)c); }
+bool BQ27220_ReadTimeToEmpty(uint16_t *t)  { return BQ27220_ReadWord(BQ27220_CMD_TIME_TO_EMPTY, t); }
+bool BQ27220_ReadTimeToFull(uint16_t *t)   { return BQ27220_ReadWord(BQ27220_CMD_TIME_TO_FULL, t); }
 bool BQ27220_ReadBatteryStatus(uint16_t *s) { return BQ27220_ReadWord(BQ27220_CMD_BATTERY_STATUS, s); }
 bool BQ27220_ReadOperationStatus(uint16_t *s) { return BQ27220_ReadWord(BQ27220_CMD_OPERATION_STATUS, s); }
 bool BQ27220_ReadDesignCapacity(uint16_t *c) { return BQ27220_ReadWord(BQ27220_CMD_DESIGN_CAPACITY, c); }
