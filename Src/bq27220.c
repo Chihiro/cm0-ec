@@ -27,8 +27,8 @@
 
 /* Expected Design Capacity in mAh. Used to detect power-loss:
  * after a power cycle the BQ27220 reverts to factory defaults;
- * if Design Capacity reads 3300 our gm.fs config is loaded. */
-#define BQ27220_DESIGN_CAPACITY_MAH  3300U
+ * if Design Capacity reads 2500 our gm.fs config is loaded. */
+#define BQ27220_DESIGN_CAPACITY_MAH  2500U
 
 /*============================================================================
  * Internal helpers
@@ -823,6 +823,8 @@ bool BQ27220_EnterFullAccess(void)
  *============================================================================*/
 
 /*
+ * Source: gauge_config/0220_0_03-bq27220_2500mAh_3700mV.gm.fs
+ *
  * gm.fs text format:
  *   ; comment line (skip)
  *   W: AA 3E <bytes...>   — write block to MACData
@@ -888,11 +890,11 @@ static const char s_gm_fs_data[] =
     "X: 10\n"
     "W: AA 3E 7F 92\n"
     "C: AA 3E 7F 92 0C 8C 8C 0A F0 0B 54 00 05 10 68 10 04 64 5F 0B 54 0B B8 06 08 10 68 10 04 64 5F\n"
-    "W: AA 3E 9A 92 00 10 2A 0C E4 0C E4\n"
-    "W: AA 60 B9 0B\n"
+    "W: AA 3E 9A 92 00 10 2A 09 C4 09 C4\n"
+    "W: AA 60 FF 0B\n"
     "X: 10\n"
     "W: AA 3E 9A 92\n"
-    "C: AA 3E 9A 92 00 10 2A 0C E4 0C E4\n"
+    "C: AA 3E 9A 92 00 10 2A 09 C4 09 C4\n"
     "W: AA 3E 8F 41 00\n"
     "W: AA 60 2F 05\n"
     "X: 10\n"
@@ -923,11 +925,11 @@ static const char s_gm_fs_data[] =
     "X: 10\n"
     "W: AA 3E 68 92\n"
     "C: AA 3E 68 92 14 00 00 00 C8 00 00 64 64 08 0E 74 00 64 1F 40\n"
-    "W: AA 3E A3 92 0E 10 00 64 0E 9F 00 95 03 63 0F BE 01 3C 09 00 00 0B D7 01 0D 39 01 0D AD 01 10 4D 0F CB 0F 55\n"
-    "W: AA 60 0D 24\n"
+    "W: AA 3E A3 92 0E 74 00 64 0E 9F 00 95 03 63 0F BE 01 3C 09 00 00 0B D7 01 0D 39 01 0D AD 01 10 4D 0F CB 0F 55\n"
+    "W: AA 60 A9 24\n"
     "X: 10\n"
     "W: AA 3E A3 92\n"
-    "C: AA 3E A3 92 0E 10 00 64 0E 9F 00 95 03 63 0F BE 01 3C 09 00 00 0B D7 01 0D 39 01 0D AD 01 10 4D 0F CB 0F 55\n"
+    "C: AA 3E A3 92 0E 74 00 64 0E 9F 00 95 03 63 0F BE 01 3C 09 00 00 0B D7 01 0D 39 01 0D AD 01 10 4D 0F CB 0F 55\n"
     "W: AA 3E C3 92 0E ED 0E 8D 0E 48 0E 23 0D FE 0D BB 0D 6F 0A 99\n"
     "W: AA 60 9B 14\n"
     "X: 10\n"
@@ -1180,7 +1182,7 @@ bool BQ27220_GaugeBoot(uint32_t now_ms)
      *
      * Design Capacity (cmd 0x3C) is a standard command readable in any
      * security mode. After a power cycle, the BQ27220 reverts to factory
-     * defaults (Design Capacity ≠ 3300). If it reads 3300, our gm.fs
+     * defaults (Design Capacity ≠ 2500). If it reads 2500, our gm.fs
      * config is already loaded — skip the entire gm.fs flow.
      */
     BQ_LOG("Step 2/5: Read Design Capacity (power-loss check)...");
@@ -1257,7 +1259,7 @@ bool BQ27220_GaugeBoot(uint32_t now_ms)
         return false;
     }
 
-    /* Step 4: Verify Design Capacity is now 3300 */
+    /* Step 4: Verify Design Capacity is now 2500 */
     BQ_LOG("Step 4/5: Verify Design Capacity after gm.fs...");
     if (!BQ27220_ReadDesignCapacity(&design_cap)) {
         BQ_LOG("  FAIL: I2C error reading Design Capacity");

@@ -119,8 +119,8 @@ extern "C" {
  *
  * BQ27220 ITPOR bit position is NOT publicly documented in the TRM.
  * Instead, we detect power-loss by reading Design Capacity (cmd 0x3C):
- *   - Design Capacity == 3300 mAh → gm.fs config is loaded
- *   - Design Capacity ≠ 3300 mAh → power was lost, re-write gm.fs
+ *   - Design Capacity == 2500 mAh → gm.fs config is loaded
+ *   - Design Capacity ≠ 2500 mAh → power was lost, re-write gm.fs
  *
  * Design Capacity is a standard command readable in any security mode,
  * so this check can be done before unsealing.
@@ -340,8 +340,8 @@ bool BQ27220_ConfirmSealed(void);
  *
  *         Flow:
  *         1. Probe → Design Capacity (power-loss check)
- *         2. If Design Capacity == 3300: config already loaded → SUCCESS
- *         3. If Design Capacity ≠ 3300: power was lost →
+ *         2. If Design Capacity == 2500: config already loaded → SUCCESS
+ *         3. If Design Capacity ≠ 2500: power was lost →
  *            SEC → Unseal → FullAccess → CFGUPDATE → gm.fs →
  *            EXIT_REINIT → Confirm → Verify Design Capacity → SEALED
  *
